@@ -143,11 +143,17 @@ static DEFINE_MUTEX(smd_creation_mutex);
 static int smd_initialized;
 
 LIST_HEAD(smd_ch_closed_list);
+LIST_HEAD(smd_ch_closing_list);
+LIST_HEAD(smd_ch_to_close_list);
 LIST_HEAD(smd_ch_list_modem);
 LIST_HEAD(smd_ch_list_dsp);
 
 static unsigned char smd_ch_allocated[64];
 static struct work_struct probe_work;
+
+static void finalize_channel_close_fn(struct work_struct *work);
+static DECLARE_WORK(finalize_channel_close_work, finalize_channel_close_fn);
+static struct workqueue_struct *channel_close_wq;
 
 /* how many bytes are available for reading */
 static int smd_stream_read_avail(struct smd_channel *ch)
@@ -327,12 +333,38 @@ static void smd_state_change(struct smd_channel *ch,
 			ch_set_state(ch, SMD_SS_OPENED);
 		ch->notify(ch->priv, SMD_EVENT_OPEN);
 		break;
+	case SMD_SS_CLOSING:
+		if (ch->send->state == SMD_SS_CLOSED) {
+			list_move(&ch->ch_list,
+					&smd_ch_to_close_list);
+			queue_work(channel_close_wq,
+						&finalize_channel_close_work);
+		}
+		break;
 	case SMD_SS_FLUSHING:
 	case SMD_SS_RESET:
 		/* we should force them to close? */
 	default:
 		ch->notify(ch->priv, SMD_EVENT_CLOSE);
 	}
+}
+
+static void handle_smd_irq_closing_list(void)
+{
+	unsigned long flags;
+	struct smd_channel *ch;
+	struct smd_channel *index;
+	unsigned tmp;
+
+	spin_lock_irqsave(&smd_lock, flags);
+	list_for_each_entry_safe(ch, index, &smd_ch_closing_list, ch_list) {
+		if (ch->recv->fSTATE)
+			ch->recv->fSTATE = 0;
+		tmp = ch->recv->state;
+		if (tmp != ch->last_state)
+			smd_state_change(ch, ch->last_state, tmp);
+	}
+	spin_unlock_irqrestore(&smd_lock, flags);
 }
 
 static void handle_smd_irq(struct list_head *list, void (*notify)(void))
@@ -374,6 +406,7 @@ static void handle_smd_irq(struct list_head *list, void (*notify)(void))
 static irqreturn_t smd_modem_irq_handler(int irq, void *data)
 {
 	handle_smd_irq(&smd_ch_list_modem, notify_modem_smd);
+	handle_smd_irq_closing_list();
 	return IRQ_HANDLED;
 }
 
@@ -381,6 +414,7 @@ static irqreturn_t smd_modem_irq_handler(int irq, void *data)
 static irqreturn_t smd_dsp_irq_handler(int irq, void *data)
 {
 	handle_smd_irq(&smd_ch_list_dsp, notify_dsp_smd);
+	handle_smd_irq_closing_list();
 	return IRQ_HANDLED;
 }
 #endif
@@ -389,6 +423,7 @@ static void smd_fake_irq_handler(unsigned long arg)
 {
 	handle_smd_irq(&smd_ch_list_modem, notify_modem_smd);
 	handle_smd_irq(&smd_ch_list_dsp, notify_dsp_smd);
+	handle_smd_irq_closing_list();
 }
 
 static DECLARE_TASKLET(smd_fake_irq_tasklet, smd_fake_irq_handler, 0);
@@ -651,6 +686,26 @@ static void do_nothing_notify(void *priv, unsigned flags)
 {
 }
 
+static void finalize_channel_close_fn(struct work_struct *work)
+{
+	unsigned long flags;
+	struct smd_channel *ch;
+	struct smd_channel *index;
+
+	spin_lock_irqsave(&smd_lock, flags);
+	list_for_each_entry_safe(ch, index,  &smd_ch_to_close_list, ch_list) {
+		list_del(&ch->ch_list);
+		spin_unlock_irqrestore(&smd_lock, flags);
+		mutex_lock(&smd_creation_mutex);
+		list_add(&ch->ch_list, &smd_ch_closed_list);
+		mutex_unlock(&smd_creation_mutex);
+		ch->notify(ch->priv, SMD_EVENT_REOPEN_READY);
+		ch->notify = do_nothing_notify;
+		spin_lock_irqsave(&smd_lock, flags);
+	}
+	spin_unlock_irqrestore(&smd_lock, flags);
+}
+
 struct smd_channel *smd_get_channel(const char *name)
 {
 	struct smd_channel *ch;
@@ -728,14 +783,18 @@ int smd_close(smd_channel_t *ch)
 		return -1;
 
 	spin_lock_irqsave(&smd_lock, flags);
-	ch->notify = do_nothing_notify;
 	list_del(&ch->ch_list);
 	ch_set_state(ch, SMD_SS_CLOSED);
-	spin_unlock_irqrestore(&smd_lock, flags);
-
-	mutex_lock(&smd_creation_mutex);
-	list_add(&ch->ch_list, &smd_ch_closed_list);
-	mutex_unlock(&smd_creation_mutex);
+	if (ch->recv->state == SMD_SS_OPENED) {
+		list_add(&ch->ch_list, &smd_ch_closing_list);
+		spin_unlock_irqrestore(&smd_lock, flags);
+	} else {
+		spin_unlock_irqrestore(&smd_lock, flags);
+		ch->notify = do_nothing_notify;
+		mutex_lock(&smd_creation_mutex);
+		list_add(&ch->ch_list, &smd_ch_closed_list);
+		mutex_unlock(&smd_creation_mutex);
+	}
 
 	return 0;
 }
@@ -1001,6 +1060,12 @@ static int __devinit msm_smd_probe(struct platform_device *pdev)
 	proc_comm_boot_wait();
 
 	INIT_WORK(&probe_work, smd_channel_probe_worker);
+
+	channel_close_wq = create_singlethread_workqueue("smd_channel_close");
+	if (IS_ERR(channel_close_wq)) {
+		pr_err("%s: create_singlethread_workqueue ENOMEM\n", __func__);
+		return -ENOMEM;
+	}
 
 	if (smd_core_init()) {
 		pr_err("smd_core_init() failed\n");
