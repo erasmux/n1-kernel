@@ -596,3 +596,35 @@ void __init msm_acpu_clock_init(struct msm_acpu_clock_platform_data *clkdata)
 	}
 #endif
 }
+
+#ifndef CONFIG_MSM_CPU_AVS
+ssize_t acpuclk_get_vdd_levels_str(char *buf)
+{
+	int i, len = 0;
+	if (buf) {
+		mutex_lock(&drv_state.lock);
+		for (i = 0; acpu_freq_tbl[i].acpu_khz; i++) {
+			if (freq_table[i].frequency != CPUFREQ_ENTRY_INVALID)
+				len += sprintf(buf + len, "%8u: %4d\n", acpu_freq_tbl[i].acpu_khz, acpu_freq_tbl[i].vdd);
+		}
+		mutex_unlock(&drv_state.lock);
+	}
+	return len;
+}
+
+void acpuclk_set_vdd(unsigned acpu_khz, int vdd)
+{
+	int i;
+	vdd = vdd / 25 * 25;
+	mutex_lock(&drv_state.lock);
+	for (i = 0; acpu_freq_tbl[i].acpu_khz; i++) {
+		if (freq_table[i].frequency != CPUFREQ_ENTRY_INVALID) {
+			if (acpu_khz == 0)
+				acpu_freq_tbl[i].vdd = min(max((acpu_freq_tbl[i].vdd + vdd), MAHIMAHI_MIN_UV_MV), MAHIMAHI_MAX_UV_MV);
+			else if (acpu_freq_tbl[i].acpu_khz == acpu_khz)
+				acpu_freq_tbl[i].vdd = min(max(vdd, MAHIMAHI_MIN_UV_MV), MAHIMAHI_MAX_UV_MV);
+		}
+	}
+	mutex_unlock(&drv_state.lock);
+}
+#endif
