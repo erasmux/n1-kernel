@@ -33,6 +33,8 @@ struct msm_hsusb_platform_data {
 
 	/* val, reg pairs terminated by -1 */
 	int *phy_init_seq;
+
+	char *serial_number;
 };
 
 #endif
