@@ -522,7 +522,7 @@ int kgsl_yamato_init(struct kgsl_device *device, struct kgsl_devconfig *config)
 	kgsl_yamato_regwrite(device, REG_RBBM_PM_OVERRIDE2, 0xffffffff);
 
 	kgsl_yamato_regwrite(device, REG_RBBM_SOFT_RESET, 0xFFFFFFFF);
-	msleep(50);
+	usleep_range(10000, 15000);
 	kgsl_yamato_regwrite(device, REG_RBBM_SOFT_RESET, 0x00000000);
 
 	kgsl_yamato_regwrite(device, REG_RBBM_CNTL, 0x00004442);
@@ -787,7 +787,7 @@ bool kgsl_yamato_is_idle(struct kgsl_device *device)
 	BUG_ON(!(rb->flags & KGSL_FLAGS_STARTED));
 
 	GSL_RB_GET_READPTR(rb, &rb->rptr);
-	if (rb->rptr == rb->wptr) {
+	if (!kgsl_driver.active_cnt && (rb->rptr == rb->wptr)) {
 		kgsl_yamato_regread(device, REG_RBBM_STATUS, &rbbm_status);
 		if (rbbm_status == 0x110)
 			return true;
@@ -795,38 +795,37 @@ bool kgsl_yamato_is_idle(struct kgsl_device *device)
 	return false;
 }
 
+/* max msecs to wait for gpu to finish its operation(s) */
+#define MAX_WAITGPU_SECS (HZ + HZ/2)
+
 int kgsl_yamato_idle(struct kgsl_device *device, unsigned int timeout)
 {
-	int status = -EINVAL;
 	struct kgsl_ringbuffer *rb = &device->ringbuffer;
 	struct kgsl_mmu_debug mmu_dbg;
 	unsigned int rbbm_status;
-	int idle_count = 0;
-#define IDLE_COUNT_MAX 1000000
 
-	KGSL_DRV_VDBG("enter (device=%p, timeout=%d)\n", device, timeout);
+	unsigned long wait_time = jiffies + MAX_WAITGPU_SECS;
 
-	(void)timeout;
+	KGSL_DRV_VDBG("enter (device=%p)\n", device);
 
 	/* first, wait until the CP has consumed all the commands in
 	 * the ring buffer
 	 */
 	if (rb->flags & KGSL_FLAGS_STARTED) {
 		do {
-			idle_count++;
 			GSL_RB_GET_READPTR(rb, &rb->rptr);
 
-		} while (rb->rptr != rb->wptr && idle_count < IDLE_COUNT_MAX);
-		if (idle_count == IDLE_COUNT_MAX)
-			goto err;
+			if (time_after(jiffies, wait_time))
+				goto err;
+		} while (rb->rptr != rb->wptr);
 	}
 	/* now, wait for the GPU to finish its operations */
-	for (idle_count = 0; idle_count < IDLE_COUNT_MAX; idle_count++) {
+	wait_time = jiffies + MAX_WAITGPU_SECS;
+	while (time_before(jiffies, wait_time)) {
 		kgsl_yamato_regread(device, REG_RBBM_STATUS, &rbbm_status);
-
 		if (rbbm_status == 0x110) {
-			status = 0;
-			goto done;
+			KGSL_DRV_VDBG("return %d\n", 0);
+			return 0;
 		}
 	}
 
@@ -836,11 +835,7 @@ err:
 	kgsl_ringbuffer_dump(rb);
 	kgsl_mmu_debug(&device->mmu, &mmu_dbg);
 	BUG();
-
-done:
-	KGSL_DRV_VDBG("return %d\n", status);
-
-	return status;
+	return -ETIMEDOUT;
 }
 
 int kgsl_yamato_regread(struct kgsl_device *device, unsigned int offsetwords,
@@ -883,7 +878,7 @@ static inline int _wait_timestamp(struct kgsl_device *device,
 {
 	long status;
 
-	status = wait_event_interruptible_timeout(device->ib1_wq,
+	status = wait_io_event_interruptible_timeout(device->ib1_wq,
 			kgsl_cmdstream_check_timestamp(device, timestamp),
 			msecs_to_jiffies(msecs));
 

@@ -173,18 +173,10 @@ static int msm_timer_set_next_event(unsigned long cycles,
 	clock->last_set = now;
 	clock->alarm_vtime = alarm + clock->offset;
 	late = now - alarm;
-	if (late >= (int)(-clock->write_delay << clock->shift) && late < DGT_HZ*5) {
-		static int print_limit = 10;
-		if (print_limit > 0) {
-			print_limit--;
-			printk(KERN_NOTICE "msm_timer_set_next_event(%lu) "
-			       "clock %s, alarm already expired, now %x, "
-			       "alarm %x, late %d%s\n",
-			       cycles, clock->clockevent.name, now, alarm, late,
-			       print_limit ? "" : " stop printing");
-		}
+	if (late >= (int)(-clock->write_delay << clock->shift) &&
+	    late < clock->freq*5)
 		return -ETIME;
-	}
+
 	return 0;
 }
 
@@ -206,6 +198,11 @@ static void msm_timer_set_mode(enum clock_event_mode mode,
 		clock->offset = -msm_read_timer_count(clock) + clock->stopped_tick;
 		msm_active_clock = clock;
 		writel(TIMER_ENABLE_EN, clock->regbase + TIMER_ENABLE);
+		if (get_irq_chip(clock->irq.irq) &&
+		    get_irq_chip(clock->irq.irq)->irq_unmask) {
+			get_irq_chip(clock->irq.irq)->irq_unmask(
+				irq_get_irq_data(clock->irq.irq));
+		}
 		break;
 	case CLOCK_EVT_MODE_UNUSED:
 	case CLOCK_EVT_MODE_SHUTDOWN:
@@ -215,6 +212,11 @@ static void msm_timer_set_mode(enum clock_event_mode mode,
 		clock->stopped_tick = (msm_read_timer_count(clock) +
 					clock->offset) >> clock->shift;
 		writel(0, clock->regbase + TIMER_ENABLE);
+		if (get_irq_chip(clock->irq.irq) &&
+		    get_irq_chip(clock->irq.irq)->irq_mask) {
+			get_irq_chip(clock->irq.irq)->irq_mask(
+				irq_get_irq_data(clock->irq.irq));
+		}
 		break;
 	}
 	local_irq_restore(irq_flags);
@@ -618,7 +620,7 @@ static struct msm_clock msm_clocks[] = {
 		.regbase = MSM_DGT_BASE,
 		.freq = DGT_HZ >> MSM_DGT_SHIFT,
 		.shift = MSM_DGT_SHIFT,
-		.write_delay = 2,
+		.write_delay = 9,
 	}
 };
 
@@ -718,6 +720,9 @@ static void __init msm_timer_init(void)
 		if (res)
 			printk(KERN_ERR "msm_timer_init: setup_irq "
 			       "failed for %s\n", cs->name);
+
+		get_irq_chip(clock->irq.irq)->irq_mask(irq_get_irq_data(
+								clock->irq.irq));
 
 		clockevents_register_device(ce);
 	}
