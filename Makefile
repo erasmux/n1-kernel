@@ -335,13 +335,13 @@ CHECK		= sparse
 
 CHECKFLAGS     := -D__linux__ -Dlinux -D__STDC__ -Dunix -D__unix__ \
 		  -Wbitwise -Wno-return-void $(CF)
-CFLAGS_MODULE   = -fgcse -fsched-spec-load-dangerous -fforce-addr -ffast-math -funsafe-math-optimizations -fsingle-precision-constant -mtune=cortex-a8 -march=armv7-a -mfpu=neon -ftree-vectorize
-AFLAGS_MODULE   = -fgcse -fsched-spec-load-dangerous -fforce-addr -ffast-math -funsafe-math-optimizations -fsingle-precision-constant -mtune=cortex-a8 -march=armv7-a -mfpu=neon -ftree-vectorize
+COMMON_OPT_FLAGS = -fgcse -fsched-spec-load-dangerous -fforce-addr -ffast-math -funsafe-math-optimizations -fsingle-precision-constant -mtune=cortex-a8 -march=armv7-a -mfpu=neon -ftree-vectorize -funswitch-loops -funroll-loops -fipa-cp-clone -fpredictive-commoning -pipe
+CFLAGS_MODULE   = $(COMMON_OPT_FLAGS)
+AFLAGS_MODULE   = $(COMMON_OPT_FLAGS)
 LDFLAGS_MODULE  =
-CFLAGS_KERNEL	= -fgcse -fsched-spec-load-dangerous -fforce-addr -ffast-math -funsafe-math-optimizations -fsingle-precision-constant -mtune=cortex-a8 -march=armv7-a -mfpu=neon -ftree-vectorize
-AFLAGS_KERNEL	= -fgcse -fsched-spec-load-dangerous -fforce-addr -ffast-math -funsafe-math-optimizations -fsingle-precision-constant -mtune=cortex-a8 -march=armv7-a -mfpu=neon -ftree-vectorize
+CFLAGS_KERNEL	= $(COMMON_OPT_FLAGS)
+AFLAGS_KERNEL	= $(COMMON_OPT_FLAGS)
 CFLAGS_GCOV	= -fprofile-arcs -ftest-coverage
-
 
 # Use LINUXINCLUDE when you must reference the include/ directory.
 # Needed to be compatible with the O= option
@@ -355,7 +355,8 @@ KBUILD_CFLAGS   := -Wall -Wundef -Wstrict-prototypes -Wno-trigraphs \
 		   -fno-strict-aliasing -fno-common \
 		   -Werror-implicit-function-declaration \
 		   -Wno-format-security \
-		   -fno-delete-null-pointer-checks
+		   -fno-delete-null-pointer-checks \
+		   -mno-unaligned-access
 KBUILD_AFLAGS_KERNEL :=
 KBUILD_CFLAGS_KERNEL :=
 KBUILD_AFLAGS   := -D__ASSEMBLY__
